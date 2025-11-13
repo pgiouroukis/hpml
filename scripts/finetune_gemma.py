@@ -374,6 +374,8 @@ def main() -> None:
     set_seed(args.seed)
 
     experiment_dir = build_experiment_dir(args)
+    final_model_dir = experiment_dir / "final_model"
+    final_model_dir.mkdir(parents=True, exist_ok=True)
     args_dict = vars(args).copy()
     args_dict["resolved_output_dir"] = str(experiment_dir)
     config_path = experiment_dir / "args.json"
@@ -460,8 +462,8 @@ def main() -> None:
     )
 
     trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
-    trainer.save_model()
-    tokenizer.save_pretrained(experiment_dir)
+    trainer.save_model(str(final_model_dir))
+    tokenizer.save_pretrained(final_model_dir)
 
     if args.do_eval and eval_dataset is not None:
         metrics = trainer.evaluate()
