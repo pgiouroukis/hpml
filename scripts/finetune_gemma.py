@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 from dataclasses import dataclass
@@ -470,6 +471,13 @@ def main() -> None:
     if args.do_eval and eval_dataset is not None:
         metrics = trainer.evaluate()
         print(metrics)
+
+    del trainer
+    del model
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
 
 
 if __name__ == "__main__":
