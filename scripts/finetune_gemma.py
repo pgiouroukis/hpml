@@ -114,9 +114,11 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def table_to_lines(table: Sequence[Sequence[str]]) -> List[str]:
+def table_to_lines(table: Sequence[Sequence[str]] | None) -> List[str]:
+    if not table:
+        return []
     lines: List[str] = []
-    for row in table or []:
+    for row in table:
         cleaned = [cell.strip() for cell in row if cell and cell.strip()]
         if cleaned:
             lines.append(" | ".join(cleaned))
