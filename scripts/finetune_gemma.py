@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Sequence
 
@@ -59,7 +60,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model_name", type=str, default="google/gemma-3-1b-it")
     parser.add_argument("--train_file", type=str, default="FinQA/dataset/train.json")
     parser.add_argument("--eval_file", type=str, default="FinQA/dataset/dev.json")
-    parser.add_argument("--output_dir", type=str, default="runs/gemma_finetune")
+    parser.add_argument("--output_dir", type=str, default="__output__")
     parser.add_argument("--input_mode", type=str, choices={"gold", "all"}, default="gold")
     parser.add_argument(
         "--target_field",
@@ -265,21 +266,21 @@ def slugify(value: str) -> str:
 
 
 def build_experiment_dir(args: argparse.Namespace) -> Path:
-    base = Path("__output__")
+    base = Path(args.output_dir)
     base.mkdir(parents=True, exist_ok=True)
-    label = slugify(Path(args.output_dir).name if args.output_dir else "run")
+    label = slugify(Path(args.model_name).name)
     lr_token = slugify(f"{args.learning_rate:.1e}")
     parts = [
         label,
-        f"target-{slugify(args.target_field)}",
-        f"input-{slugify(args.input_mode)}",
+        f"t{slugify(args.target_field)}",
+        f"i{slugify(args.input_mode)}",
         f"seq{args.max_seq_length}",
         f"bs{args.per_device_train_batch_size}",
         f"ga{args.gradient_accumulation_steps}",
-        f"epochs{str(args.num_train_epochs).replace('.', '_')}",
         f"lr{lr_token}",
+        datetime.now().strftime("%Y%m%d-%H%M%S"),
     ]
-    name = "__".join(parts)
+    name = "_".join(parts)
     experiment_dir = base / name
     suffix = 1
     while experiment_dir.exists():
