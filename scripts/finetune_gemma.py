@@ -372,8 +372,10 @@ class FileLoggerCallback(TrainerCallback):
 def main() -> None:
     args = parse_args()
     set_seed(args.seed)
-
+    precision = "bf16" if args.bf16 else ("fp16" if args.fp16 else "fp32")
     experiment_dir = build_experiment_dir(args)
+    with (experiment_dir / "logs.log").open("a", encoding="utf-8") as handle:
+        handle.write(f"{datetime.now().isoformat()} params_precision={precision}\n")
     final_model_dir = experiment_dir / "final_model"
     final_model_dir.mkdir(parents=True, exist_ok=True)
     args_dict = vars(args).copy()
