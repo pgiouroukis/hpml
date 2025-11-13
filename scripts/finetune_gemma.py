@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Sequence
@@ -14,6 +15,7 @@ from transformers import (
     AutoTokenizer,
     PreTrainedTokenizerBase,
     Trainer,
+    TrainerCallback,
     TrainingArguments,
     set_seed,
 )
@@ -254,9 +256,97 @@ class LMDataCollator:
         }
 
 
+def slugify(value: str) -> str:
+    cleaned = value.replace(os.sep, "-").replace(" ", "_")
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
+    result = "".join(ch if ch in allowed else "-" for ch in cleaned)
+    result = result.strip("-_.")
+    return result or "run"
+
+
+def build_experiment_dir(args: argparse.Namespace) -> Path:
+    base = Path("__output__")
+    base.mkdir(parents=True, exist_ok=True)
+    label = slugify(Path(args.output_dir).name if args.output_dir else "run")
+    lr_token = slugify(f"{args.learning_rate:.1e}")
+    parts = [
+        label,
+        f"target-{slugify(args.target_field)}",
+        f"input-{slugify(args.input_mode)}",
+        f"seq{args.max_seq_length}",
+        f"bs{args.per_device_train_batch_size}",
+        f"ga{args.gradient_accumulation_steps}",
+        f"epochs{str(args.num_train_epochs).replace('.', '_')}",
+        f"lr{lr_token}",
+    ]
+    name = "__".join(parts)
+    experiment_dir = base / name
+    suffix = 1
+    while experiment_dir.exists():
+        suffix += 1
+        experiment_dir = base / f"{name}--{suffix}"
+    experiment_dir.mkdir(parents=True, exist_ok=True)
+    return experiment_dir
+
+
+class FileLoggerCallback(TrainerCallback):
+    def __init__(self, log_file: Path):
+        self.log_file = log_file
+        self.log_file.parent.mkdir(parents=True, exist_ok=True)
+        self.log_file.touch(exist_ok=True)
+
+    @staticmethod
+    def _to_serializable(value):
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return str(value)
+
+    def _write(self, record: Dict):
+        with self.log_file.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record) + "\n")
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if not logs:
+            return
+        record = {
+            "type": "train",
+            "step": state.global_step,
+            "epoch": state.epoch,
+        }
+        record.update({k: self._to_serializable(v) for k, v in logs.items()})
+        self._write(record)
+
+    def on_evaluate(self, args, state, control, metrics=None, **kwargs):
+        if not metrics:
+            return
+        record = {
+            "type": "eval",
+            "step": state.global_step,
+            "epoch": state.epoch,
+        }
+        record.update({k: self._to_serializable(v) for k, v in metrics.items()})
+        self._write(record)
+
+
 def main() -> None:
     args = parse_args()
     set_seed(args.seed)
+
+    experiment_dir = build_experiment_dir(args)
+    args_dict = vars(args).copy()
+    args_dict["resolved_output_dir"] = str(experiment_dir)
+    config_path = experiment_dir / "args.json"
+    config_path.write_text(json.dumps(args_dict, indent=2, sort_keys=True))
+    log_dir = experiment_dir / ".log"
+    log_file = log_dir / "metrics.jsonl"
+
+    print(f"Experiment directory: {experiment_dir}")
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=False)
     if tokenizer.pad_token is None:
@@ -296,7 +386,7 @@ def main() -> None:
         model.config.use_cache = False
 
     training_args = TrainingArguments(
-        output_dir=args.output_dir,
+        output_dir=str(experiment_dir),
         num_train_epochs=args.num_train_epochs,
         per_device_train_batch_size=args.per_device_train_batch_size,
         per_device_eval_batch_size=args.per_device_eval_batch_size,
@@ -324,11 +414,12 @@ def main() -> None:
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=LMDataCollator(tokenizer),
+        callbacks=[FileLoggerCallback(log_file)],
     )
 
     trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
     trainer.save_model()
-    tokenizer.save_pretrained(args.output_dir)
+    tokenizer.save_pretrained(experiment_dir)
 
     if args.do_eval and eval_dataset is not None:
         metrics = trainer.evaluate()
