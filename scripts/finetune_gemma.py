@@ -74,6 +74,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save_steps", type=int, default=200)
     parser.add_argument("--eval_steps", type=int, default=200)
     parser.add_argument(
+        "--attn_implementation",
+        type=str,
+        choices={"eager", "sdpa", "flash_attention_2"},
+        default="eager",
+    )
+    parser.add_argument(
         "--eval_strategy",
         "--evaluation_strategy",
         dest="eval_strategy",
@@ -275,7 +281,9 @@ def main() -> None:
         else None
     )
 
-    model = AutoModelForCausalLM.from_pretrained(args.model_name)
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model_name, attn_implementation=args.attn_implementation
+    )
     model.resize_token_embeddings(len(tokenizer))
     if args.gradient_checkpointing:
         model.gradient_checkpointing_enable()
