@@ -24,7 +24,6 @@ except ImportError:  # pragma: no cover
     AcceleratedOptimizer = None
 
 if AcceleratedOptimizer is not None:
-    _orig_train = AcceleratedOptimizer.train
 
     def _safe_train(self):
         inner = getattr(self.optimizer, "train", None)
@@ -32,7 +31,14 @@ if AcceleratedOptimizer is not None:
             return inner()
         return None
 
+    def _safe_eval(self):
+        inner = getattr(self.optimizer, "eval", None)
+        if callable(inner):
+            return inner()
+        return None
+
     AcceleratedOptimizer.train = _safe_train  # type: ignore[assignment]
+    AcceleratedOptimizer.eval = _safe_eval  # type: ignore[assignment]
 
 
 def str2bool(value: str) -> bool:
