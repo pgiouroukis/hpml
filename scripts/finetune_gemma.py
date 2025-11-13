@@ -101,7 +101,7 @@ def parse_args() -> argparse.Namespace:
         choices={"steps", "epoch"},
         default="steps",
     )
-    parser.add_argument("--save_total_limit", type=int, default=3)
+    parser.add_argument("--save_total_limit", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--resume_from_checkpoint", type=str, default=None)
     parser.add_argument("--gradient_checkpointing", type=str2bool, default=True)
