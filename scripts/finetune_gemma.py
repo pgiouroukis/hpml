@@ -268,15 +268,22 @@ def build_experiment_dir(args: argparse.Namespace) -> Path:
     base = Path("__output__")
     base.mkdir(parents=True, exist_ok=True)
     label = slugify(Path(args.model_name).name)
-    lr_token = slugify(f"{args.learning_rate:.1e}")
+    precision_tokens = []
+    if args.bf16:
+        precision_tokens.append("bf16")
+    if args.fp16 and not args.bf16:
+        precision_tokens.append("fp16")
+    if not precision_tokens:
+        precision_tokens.append("fp32")
+    precision_str = "+".join(precision_tokens)
     parts = [
         label,
         f"t{slugify(args.target_field)}",
         f"i{slugify(args.input_mode)}",
         f"seq{args.max_seq_length}",
         f"bs{args.per_device_train_batch_size}",
-        f"ga{args.gradient_accumulation_steps}",
-        f"lr{lr_token}",
+        f"ep{str(args.num_train_epochs).replace('.', '_')}",
+        f"prec{precision_str}",
         datetime.now().strftime("%Y%m%d-%H%M%S"),
     ]
     name = "_".join(parts)
