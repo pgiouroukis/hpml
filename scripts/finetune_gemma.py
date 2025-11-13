@@ -290,10 +290,18 @@ def build_experiment_dir(args: argparse.Namespace) -> Path:
 
 
 class FileLoggerCallback(TrainerCallback):
-    def __init__(self, log_file: Path):
-        self.log_file = log_file
-        self.log_file.parent.mkdir(parents=True, exist_ok=True)
-        self.log_file.touch(exist_ok=True)
+    def __init__(
+        self,
+        metrics_file: Path,
+        train_loss_file: Path,
+        eval_loss_file: Path,
+    ):
+        self.metrics_file = metrics_file
+        self.train_loss_file = train_loss_file
+        self.eval_loss_file = eval_loss_file
+        for target in (self.metrics_file, self.train_loss_file, self.eval_loss_file):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.touch(exist_ok=True)
 
     @staticmethod
     def _to_serializable(value):
@@ -307,9 +315,13 @@ class FileLoggerCallback(TrainerCallback):
             except (TypeError, ValueError):
                 return str(value)
 
-    def _write(self, record: Dict):
-        with self.log_file.open("a", encoding="utf-8") as handle:
+    def _write_metrics(self, record: Dict):
+        with self.metrics_file.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record) + "\n")
+
+    def _write_plain(self, path: Path, step: int, epoch: float, value_name: str, value):
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(f"{step}\t{epoch}\t{value_name}\t{value}\n")
 
     def on_log(self, args, state, control, logs=None, **kwargs):
         if not logs:
@@ -320,7 +332,15 @@ class FileLoggerCallback(TrainerCallback):
             "epoch": state.epoch,
         }
         record.update({k: self._to_serializable(v) for k, v in logs.items()})
-        self._write(record)
+        self._write_metrics(record)
+        if "loss" in logs:
+            self._write_plain(
+                self.train_loss_file,
+                state.global_step,
+                state.epoch if state.epoch is not None else 0,
+                "loss",
+                logs["loss"],
+            )
 
     def on_evaluate(self, args, state, control, metrics=None, **kwargs):
         if not metrics:
@@ -331,7 +351,15 @@ class FileLoggerCallback(TrainerCallback):
             "epoch": state.epoch,
         }
         record.update({k: self._to_serializable(v) for k, v in metrics.items()})
-        self._write(record)
+        self._write_metrics(record)
+        if "eval_loss" in metrics:
+            self._write_plain(
+                self.eval_loss_file,
+                state.global_step,
+                state.epoch if state.epoch is not None else 0,
+                "eval_loss",
+                metrics["eval_loss"],
+            )
 
 
 def main() -> None:
@@ -343,8 +371,9 @@ def main() -> None:
     args_dict["resolved_output_dir"] = str(experiment_dir)
     config_path = experiment_dir / "args.json"
     config_path.write_text(json.dumps(args_dict, indent=2, sort_keys=True))
-    log_dir = experiment_dir / ".log"
-    log_file = log_dir / "metrics.jsonl"
+    metrics_file = experiment_dir / "metrics.jsonl"
+    train_loss_file = experiment_dir / "train_loss.log"
+    eval_loss_file = experiment_dir / "eval_loss.log"
 
     print(f"Experiment directory: {experiment_dir}")
 
@@ -414,7 +443,13 @@ def main() -> None:
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=LMDataCollator(tokenizer),
-        callbacks=[FileLoggerCallback(log_file)],
+        callbacks=[
+            FileLoggerCallback(
+                metrics_file=metrics_file,
+                train_loss_file=train_loss_file,
+                eval_loss_file=eval_loss_file,
+            )
+        ],
     )
 
     trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
