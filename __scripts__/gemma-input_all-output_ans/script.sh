@@ -3,5 +3,5 @@ python scripts/finetune_gemma.py \
   --target_field program \
   --do_eval \
   --eval_steps 200 \
-  --per_device_train_batch_size 2 \
+  --per_device_train_batch_size 1 \
   --num_train_epochs 1
