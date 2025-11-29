@@ -61,6 +61,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model_name", type=str, default="google/gemma-3-1b-it")
     parser.add_argument("--train_file", type=str, default="FinQA/dataset/train.json")
     parser.add_argument("--eval_file", type=str, default="FinQA/dataset/dev.json")
+    parser.add_argument(
+        "--output_folder",
+        type=str,
+        default="",
+        help="Optional name for the run directory inside __output__.",
+    )
     parser.add_argument("--input_mode", type=str, choices={"gold", "all"}, default="gold")
     parser.add_argument(
         "--target_field",
@@ -270,6 +276,16 @@ def slugify(value: str) -> str:
 def build_experiment_dir(args: argparse.Namespace) -> Path:
     base = Path("__output__")
     base.mkdir(parents=True, exist_ok=True)
+    custom = (getattr(args, "output_folder", "") or "").strip()
+    if custom:
+        name = slugify(custom)
+        experiment_dir = base / name
+        suffix = 1
+        while experiment_dir.exists():
+            suffix += 1
+            experiment_dir = base / f"{name}--{suffix}"
+        experiment_dir.mkdir(parents=True, exist_ok=True)
+        return experiment_dir
     label = slugify(Path(args.model_name).name)
     precision_tokens = []
     if args.bf16:
