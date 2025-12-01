@@ -3,6 +3,7 @@ python scripts/finetune_gemma.py \
   --input_mode all \
   --target_field program \
   --do_eval \
+  --do_test \
   --eval_steps 200 \
   --per_device_train_batch_size 1 \
   --num_train_epochs 1 \

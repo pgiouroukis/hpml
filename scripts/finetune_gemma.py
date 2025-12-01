@@ -5,6 +5,7 @@ import argparse
 import gc
 import json
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -12,6 +13,7 @@ from typing import Dict, List, Sequence
 
 import torch
 from torch.utils.data import Dataset
+from sympy import simplify
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -21,6 +23,7 @@ from transformers import (
     TrainingArguments,
     set_seed,
 )
+from tqdm import tqdm
 
 try:
     from accelerate.optimizer import AcceleratedOptimizer
@@ -117,6 +120,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--do_eval", action="store_true")
     parser.add_argument("--load_best_model_at_end", type=str2bool, default=True)
     parser.add_argument("--lr_scheduler_type", type=str, default="cosine")
+    parser.add_argument("--do_test", action="store_true", help="Run FinQA evaluation on the test split.")
+    parser.add_argument("--test_file", type=str, default="FinQA/dataset/test.json")
+    parser.add_argument("--max_test_samples", type=int, default=0)
+    parser.add_argument(
+        "--generation_max_new_tokens",
+        type=int,
+        default=128,
+        help="Maximum new tokens to generate for predictions.",
+    )
+    parser.add_argument("--generation_num_beams", type=int, default=1)
+    parser.add_argument("--generation_temperature", type=float, default=1.0)
+    parser.add_argument("--generation_top_p", type=float, default=1.0)
+    parser.add_argument(
+        "--generation_do_sample",
+        action="store_true",
+        help="Use sampling instead of greedy/beam decoding when generating test predictions.",
+    )
     return parser.parse_args()
 
 
@@ -215,12 +235,7 @@ class FinQADataset(Dataset):
         raw_data = json.loads(Path(path).read_text())
         if max_samples:
             raw_data = raw_data[:max_samples]
-        hint = task_instruction.strip()
-        if not hint:
-            if target_field == "program":
-                hint = "Generate the FinQA reasoning program (DSL) that answers the question."
-            else:
-                hint = "Return the final numeric answer."
+        hint = resolve_task_hint(target_field, task_instruction)
         self.features = [
             encode_example(
                 tokenizer=tokenizer,
@@ -263,6 +278,510 @@ class LMDataCollator:
             "attention_mask": torch.tensor(batch_attention, dtype=torch.long),
             "labels": torch.tensor(batch_labels, dtype=torch.long),
         }
+
+
+ALL_OPS = [
+    "add",
+    "subtract",
+    "multiply",
+    "divide",
+    "exp",
+    "greater",
+    "table_max",
+    "table_min",
+    "table_sum",
+    "table_average",
+]
+
+
+def program_tokenization(original_program: str) -> List[str]:
+    if not isinstance(original_program, str):
+        original_program = str(original_program)
+    original_program = original_program.strip()
+    if not original_program:
+        return ["EOF"]
+    program: List[str] = []
+    for tok in re.split(r",\s*", original_program):
+        if not tok:
+            continue
+        cur_tok = ""
+        for char in tok:
+            if char == ")":
+                if cur_tok:
+                    program.append(cur_tok)
+                    cur_tok = ""
+            cur_tok += char
+            if char in {"(", ")"}:
+                program.append(cur_tok)
+                cur_tok = ""
+        if cur_tok:
+            program.append(cur_tok)
+    program.append("EOF")
+    return program
+
+
+def str_to_num(text: str):
+    text = text.replace(",", "")
+    try:
+        num = float(text)
+    except ValueError:
+        if "%" in text:
+            text = text.replace("%", "")
+            try:
+                num = float(text) / 100.0
+            except ValueError:
+                num = "n/a"
+        elif "const" in text:
+            text = text.replace("const_", "")
+            if text == "m1":
+                text = "-1"
+            num = float(text)
+        else:
+            num = "n/a"
+    return num
+
+
+def process_row(row_in: Sequence[str]):
+    row_out: List[float] = []
+    for num in row_in:
+        num = num.replace("$", "").strip()
+        num = num.split("(")[0].strip()
+        num_value = str_to_num(num)
+        if num_value == "n/a":
+            return "n/a"
+        row_out.append(num_value)
+    return row_out
+
+
+def eval_program(program: Sequence[str], table: Sequence[Sequence[str]] | None):
+    invalid_flag = 0
+    this_res = "n/a"
+    try:
+        program = list(program[:-1])  # remove EOF
+        for ind, token in enumerate(program):
+            if ind % 4 == 0:
+                if token.strip("(") not in ALL_OPS:
+                    return 1, "n/a"
+            if (ind + 1) % 4 == 0:
+                if token != ")":
+                    return 1, "n/a"
+
+        program_str = "|".join(program)
+        steps = program_str.split(")")[:-1]
+        res_dict = {}
+
+        for ind, step in enumerate(steps):
+            step = step.strip()
+            if len(step.split("(")) > 2:
+                invalid_flag = 1
+                break
+            op = step.split("(")[0].strip("|").strip()
+            args = step.split("(")[1].strip("|").strip()
+            arg1 = args.split("|")[0].strip()
+            arg2 = args.split("|")[1].strip()
+
+            if op in {"add", "subtract", "multiply", "divide", "exp", "greater"}:
+                if "#" in arg1:
+                    arg1_val = res_dict.get(int(arg1.replace("#", "")), "n/a")
+                else:
+                    arg1_val = str_to_num(arg1)
+                if arg1_val == "n/a":
+                    invalid_flag = 1
+                    break
+
+                if "#" in arg2:
+                    arg2_val = res_dict.get(int(arg2.replace("#", "")), "n/a")
+                else:
+                    arg2_val = str_to_num(arg2)
+                if arg2_val == "n/a":
+                    invalid_flag = 1
+                    break
+
+                if op == "add":
+                    this_res = arg1_val + arg2_val
+                elif op == "subtract":
+                    this_res = arg1_val - arg2_val
+                elif op == "multiply":
+                    this_res = arg1_val * arg2_val
+                elif op == "divide":
+                    this_res = arg1_val / arg2_val
+                elif op == "exp":
+                    this_res = arg1_val**arg2_val
+                elif op == "greater":
+                    this_res = "yes" if arg1_val > arg2_val else "no"
+                res_dict[ind] = this_res
+            elif "table" in op and table is not None:
+                table_dict = {row[0]: row[1:] for row in table}
+                if "#" in arg1:
+                    arg1_val = res_dict.get(int(arg1.replace("#", "")), "n/a")
+                else:
+                    if arg1 not in table_dict:
+                        invalid_flag = 1
+                        break
+                    num_row = process_row(table_dict[arg1])
+                    arg1_val = num_row
+
+                if arg1_val == "n/a":
+                    invalid_flag = 1
+                    break
+                if op == "table_max":
+                    this_res = max(arg1_val)
+                elif op == "table_min":
+                    this_res = min(arg1_val)
+                elif op == "table_sum":
+                    this_res = sum(arg1_val)
+                elif op == "table_average":
+                    this_res = sum(arg1_val) / len(arg1_val)
+                res_dict[ind] = this_res
+            else:
+                invalid_flag = 1
+                break
+
+        if this_res not in {"yes", "no", "n/a"}:
+            this_res = round(this_res, 5)
+    except Exception:
+        invalid_flag = 1
+    return invalid_flag, this_res
+
+
+def equal_program(program1: Sequence[str], program2: Sequence[str]) -> bool:
+    sym_map: Dict[str, str] = {}
+    program1 = program1[:-1]
+    program1_str = "|".join(program1)
+    steps = program1_str.split(")")[:-1]
+    step_dict_1: Dict[int, str] = {}
+    sym_ind = 0
+
+    for ind, step in enumerate(steps):
+        step = step.strip()
+        assert len(step.split("(")) <= 2
+        op = step.split("(")[0].strip("|").strip()
+        args = step.split("(")[1].strip("|").strip()
+        arg1 = args.split("|")[0].strip()
+        arg2 = args.split("|")[1].strip()
+        step_dict_1[ind] = step
+        if "table" in op:
+            if step not in sym_map:
+                sym_map[step] = f"a{sym_ind}"
+                sym_ind += 1
+        else:
+            if "#" not in arg1 and arg1 not in sym_map:
+                sym_map[arg1] = f"a{sym_ind}"
+                sym_ind += 1
+            if "#" not in arg2 and arg2 not in sym_map:
+                sym_map[arg2] = f"a{sym_ind}"
+                sym_ind += 1
+
+    step_dict_2: Dict[int, str] = {}
+    try:
+        program2 = program2[:-1]
+        for ind, token in enumerate(program2):
+            if ind % 4 == 0 and token.strip("(") not in ALL_OPS:
+                return False
+            if (ind + 1) % 4 == 0 and token != ")":
+                return False
+        program2_str = "|".join(program2)
+        steps = program2_str.split(")")[:-1]
+        for ind, step in enumerate(steps):
+            step = step.strip()
+            if len(step.split("(")) > 2:
+                return False
+            op = step.split("(")[0].strip("|").strip()
+            args = step.split("(")[1].strip("|").strip()
+            arg1 = args.split("|")[0].strip()
+            arg2 = args.split("|")[1].strip()
+            step_dict_2[ind] = step
+            if "table" in op:
+                if step not in sym_map:
+                    return False
+            else:
+                if "#" not in arg1:
+                    if arg1 not in sym_map:
+                        return False
+                elif int(arg1.strip("#")) >= ind:
+                    return False
+                if "#" not in arg2:
+                    if arg2 not in sym_map:
+                        return False
+                elif int(arg2.strip("#")) >= ind:
+                    return False
+    except Exception:
+        return False
+
+    def symbol_recur(step: str, step_dict: Dict[int, str]) -> str:
+        step = step.strip()
+        op = step.split("(")[0].strip("|").strip()
+        args = step.split("(")[1].strip("|").strip()
+        arg1 = args.split("|")[0].strip()
+        arg2 = args.split("|")[1].strip()
+        if "table" in op:
+            return sym_map[step]
+        if "#" in arg1:
+            arg1_part = symbol_recur(step_dict[int(arg1.replace("#", ""))], step_dict)
+        else:
+            arg1_part = sym_map[arg1]
+        if "#" in arg2:
+            arg2_part = symbol_recur(step_dict[int(arg2.replace("#", ""))], step_dict)
+        else:
+            arg2_part = sym_map[arg2]
+        if op == "add":
+            return f"( {arg1_part} + {arg2_part} )"
+        if op == "subtract":
+            return f"( {arg1_part} - {arg2_part} )"
+        if op == "multiply":
+            return f"( {arg1_part} * {arg2_part} )"
+        if op == "divide":
+            return f"( {arg1_part} / {arg2_part} )"
+        if op == "exp":
+            return f"( {arg1_part} ** {arg2_part} )"
+        if op == "greater":
+            return f"( {arg1_part} > {arg2_part} )"
+        return ""
+
+    steps_prog1 = program1_str.split(")")[:-1]
+    sym_prog1 = symbol_recur(steps_prog1[-1], step_dict_1)
+    sym_prog1 = simplify(sym_prog1, evaluate=False)
+    try:
+        steps_prog2 = program2_str.split(")")[:-1]
+        sym_prog2 = symbol_recur(steps_prog2[-1], step_dict_2)
+        sym_prog2 = simplify(sym_prog2, evaluate=False)
+    except Exception:
+        return False
+    return sym_prog1 == sym_prog2
+
+
+def clean_prediction_text(text: str, eos_token: str | None = None) -> str:
+    if not isinstance(text, str):
+        text = str(text)
+    cleaned = text.strip()
+    if "Answer:" in cleaned:
+        cleaned = cleaned.split("Answer:", 1)[-1].strip()
+    if "\n" in cleaned:
+        cleaned = cleaned.split("\n", 1)[0].strip()
+    if eos_token and eos_token in cleaned:
+        cleaned = cleaned.split(eos_token, 1)[0].strip()
+    return cleaned
+
+
+def evaluate_program_prediction(
+    prediction: str,
+    gold_program: str,
+    gold_exe_ans,
+    table: Sequence[Sequence[str]] | None,
+) -> Dict:
+    pred_tokens = program_tokenization(prediction)
+    gold_tokens = program_tokenization(gold_program)
+    invalid_flag, exe_res = eval_program(pred_tokens, table or [])
+    exec_error = None
+    execution_accuracy = invalid_flag == 0 and exe_res == gold_exe_ans
+    try:
+        program_accuracy = equal_program(gold_tokens, pred_tokens)
+    except Exception as exc:  # pragma: no cover - defensive
+        program_accuracy = False
+        exec_error = f"program_equivalence_failed: {exc}"
+    if invalid_flag:
+        exec_error = exec_error or "invalid program or execution failure"
+    if program_accuracy and invalid_flag == 0 and exe_res != gold_exe_ans:
+        exec_error = exec_error or "equivalent program but execution mismatch"
+    return {
+        "predicted_exe_ans": None if invalid_flag else exe_res,
+        "execution_accuracy": execution_accuracy,
+        "program_accuracy": program_accuracy,
+        "execution_error": exec_error,
+    }
+
+
+def load_finqa_split(path: str, max_samples: int = 0) -> List[Dict]:
+    raw_data = json.loads(Path(path).read_text())
+    if max_samples:
+        raw_data = raw_data[:max_samples]
+    return raw_data
+
+
+def resolve_task_hint(target_field: str, task_instruction: str) -> str:
+    hint = task_instruction.strip()
+    if not hint:
+        if target_field == "program":
+            hint = "Generate the FinQA reasoning program (DSL) that answers the question."
+        else:
+            hint = "Return the final numeric answer."
+    return hint
+
+
+def build_generation_entries(
+    data: List[Dict],
+    input_mode: str,
+    target_field: str,
+    task_instruction: str,
+) -> List[Dict]:
+    hint = resolve_task_hint(target_field, task_instruction)
+    entries: List[Dict] = []
+    for entry in data:
+        qa = entry["qa"]
+        prompt = build_prompt(
+            qa["question"],
+            build_context(entry, input_mode),
+            hint,
+        )
+        entries.append(
+            {
+                "id": entry["id"],
+                "qa": qa,
+                "table": entry.get("table"),
+                "prompt": prompt,
+            }
+        )
+    return entries
+
+
+def generate_predictions_for_entries(
+    model,
+    tokenizer: PreTrainedTokenizerBase,
+    entries: List[Dict],
+    max_seq_length: int,
+    generation_kwargs: Dict,
+) -> List[Dict]:
+    device = model.device if hasattr(model, "device") else torch.device("cpu")
+    if getattr(model.config, "use_cache", None) is False:
+        model.config.use_cache = True
+    model.eval()
+    predictions: List[Dict] = []
+    for item in tqdm(entries, desc="Generating on test split"):
+        encoded = tokenizer(
+            item["prompt"],
+            return_tensors="pt",
+            truncation=True,
+            max_length=max_seq_length,
+        )
+        encoded = {k: v.to(device) for k, v in encoded.items()}
+        with torch.no_grad():
+            output_ids = model.generate(
+                **encoded,
+                **generation_kwargs,
+                eos_token_id=tokenizer.eos_token_id,
+                pad_token_id=tokenizer.pad_token_id,
+            )
+        generated_tokens = output_ids[0][encoded["input_ids"].shape[1] :]
+        decoded = tokenizer.decode(generated_tokens, skip_special_tokens=True)
+        prediction_text = clean_prediction_text(decoded, tokenizer.eos_token)
+        predictions.append(
+            {
+                **item,
+                "prediction": prediction_text,
+            }
+        )
+    return predictions
+
+
+def score_predictions(
+    predictions: List[Dict],
+    target_field: str,
+) -> tuple[List[Dict], Dict[str, float]]:
+    scored: List[Dict] = []
+    exec_correct = 0
+    prog_correct = 0
+    answer_correct = 0
+    total = len(predictions)
+    for item in predictions:
+        qa = item["qa"]
+        base_record = {
+            "id": item["id"],
+            "question": qa.get("question", ""),
+            "target_field": target_field,
+            "prompt": item["prompt"],
+            "prediction": item["prediction"],
+        }
+        if target_field == "program":
+            gold_program = qa.get("program", "")
+            gold_exe_ans = qa.get("exe_ans")
+            metrics = evaluate_program_prediction(
+                prediction=item["prediction"],
+                gold_program=gold_program,
+                gold_exe_ans=gold_exe_ans,
+                table=item.get("table") or [],
+            )
+            base_record.update(
+                {
+                    "gold_program": gold_program,
+                    "gold_exe_ans": gold_exe_ans,
+                    "predicted_exe_ans": metrics["predicted_exe_ans"],
+                    "execution_accuracy": metrics["execution_accuracy"],
+                    "program_accuracy": metrics["program_accuracy"],
+                    "execution_error": metrics["execution_error"],
+                }
+            )
+            exec_correct += int(bool(metrics["execution_accuracy"]))
+            prog_correct += int(bool(metrics["program_accuracy"]))
+        else:
+            gold_target = extract_target(qa, target_field)
+            answer_match = item["prediction"].strip() == gold_target
+            base_record.update(
+                {
+                    "gold_target": gold_target,
+                    "answer_accuracy": answer_match,
+                }
+            )
+            answer_correct += int(bool(answer_match))
+        scored.append(base_record)
+
+    aggregate: Dict[str, float] = {
+        "total": total,
+        "target_field": target_field,
+    }
+    if target_field == "program":
+        aggregate["execution_accuracy"] = exec_correct / total if total else 0.0
+        aggregate["program_accuracy"] = prog_correct / total if total else 0.0
+    else:
+        aggregate["answer_accuracy"] = answer_correct / total if total else 0.0
+    return scored, aggregate
+
+
+def run_test_evaluation(model, tokenizer, args: argparse.Namespace, experiment_dir: Path) -> Dict:
+    test_data = load_finqa_split(args.test_file, args.max_test_samples)
+    generation_entries = build_generation_entries(
+        data=test_data,
+        input_mode=args.input_mode,
+        target_field=args.target_field,
+        task_instruction=args.task_instruction,
+    )
+    generation_kwargs = {
+        "max_new_tokens": args.generation_max_new_tokens,
+        "num_beams": args.generation_num_beams,
+        "temperature": args.generation_temperature,
+        "top_p": args.generation_top_p,
+        "do_sample": args.generation_do_sample,
+    }
+    predictions = generate_predictions_for_entries(
+        model=model,
+        tokenizer=tokenizer,
+        entries=generation_entries,
+        max_seq_length=args.max_seq_length,
+        generation_kwargs=generation_kwargs,
+    )
+    scored, aggregate = score_predictions(predictions, args.target_field)
+
+    predictions_path = experiment_dir / "test_predictions.jsonl"
+    metrics_path = experiment_dir / "test_metrics.json"
+
+    with predictions_path.open("w", encoding="utf-8") as handle:
+        for row in scored:
+            handle.write(json.dumps(row) + "\n")
+
+    aggregate.update(
+        {
+            "input_mode": args.input_mode,
+            "output_jsonl": str(predictions_path),
+            "generation_max_new_tokens": args.generation_max_new_tokens,
+            "generation_num_beams": args.generation_num_beams,
+            "generation_temperature": args.generation_temperature,
+            "generation_top_p": args.generation_top_p,
+            "generation_do_sample": args.generation_do_sample,
+            "max_seq_length": args.max_seq_length,
+            "test_file": args.test_file,
+        }
+    )
+    metrics_path.write_text(json.dumps(aggregate, indent=2, sort_keys=True))
+    return aggregate
 
 
 def slugify(value: str) -> str:
@@ -489,6 +1008,15 @@ def main() -> None:
     if args.do_eval and eval_dataset is not None:
         metrics = trainer.evaluate()
         print(metrics)
+
+    if args.do_test:
+        test_metrics = run_test_evaluation(
+            model=model,
+            tokenizer=tokenizer,
+            args=args,
+            experiment_dir=experiment_dir,
+        )
+        print("Test metrics:", json.dumps(test_metrics, indent=2))
 
     del trainer
     del model
