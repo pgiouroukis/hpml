@@ -8,6 +8,7 @@ import os
 import re
 from dataclasses import dataclass
 import random
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Sequence
@@ -734,12 +735,14 @@ def generate_predictions_for_entries(
     entries: List[Dict],
     max_seq_length: int,
     generation_kwargs: Dict,
-) -> List[Dict]:
+) -> tuple[List[Dict], Dict[str, float]]:
     device = model.device if hasattr(model, "device") else torch.device("cpu")
     if getattr(model.config, "use_cache", None) is False:
         model.config.use_cache = True
     model.eval()
     predictions: List[Dict] = []
+    latencies_ms: List[float] = []
+    overall_start = time.perf_counter()
     for item in tqdm(entries, desc="Generating on test split"):
         encoded = tokenizer(
             item["prompt"],
@@ -748,6 +751,7 @@ def generate_predictions_for_entries(
             max_length=max_seq_length,
         )
         encoded = {k: v.to(device) for k, v in encoded.items()}
+        start = time.perf_counter()
         with torch.no_grad():
             output_ids = model.generate(
                 **encoded,
@@ -755,6 +759,7 @@ def generate_predictions_for_entries(
                 eos_token_id=tokenizer.eos_token_id,
                 pad_token_id=tokenizer.pad_token_id,
             )
+        latency_ms = (time.perf_counter() - start) * 1000.0
         generated_tokens = output_ids[0][encoded["input_ids"].shape[1] :]
         decoded = tokenizer.decode(generated_tokens, skip_special_tokens=True)
         prediction_text = clean_prediction_text(decoded, tokenizer.eos_token)
@@ -762,9 +767,12 @@ def generate_predictions_for_entries(
             {
                 **item,
                 "prediction": prediction_text,
+                "latency_ms": latency_ms,
             }
         )
-    return predictions
+        latencies_ms.append(latency_ms)
+    total_seconds = time.perf_counter() - overall_start
+    return predictions, {"total_seconds": total_seconds, "latencies_ms": latencies_ms}
 
 
 def score_predictions(
@@ -848,7 +856,7 @@ def run_test_evaluation(model, tokenizer, args: argparse.Namespace, experiment_d
         "top_p": args.generation_top_p,
         "do_sample": args.generation_do_sample,
     }
-    predictions = generate_predictions_for_entries(
+    predictions, timing_info = generate_predictions_for_entries(
         model=model,
         tokenizer=tokenizer,
         entries=generation_entries,
@@ -856,6 +864,38 @@ def run_test_evaluation(model, tokenizer, args: argparse.Namespace, experiment_d
         generation_kwargs=generation_kwargs,
     )
     scored, aggregate = score_predictions(predictions, args.target_field)
+
+    lat_path = experiment_dir / "test_inference_latencies.jsonl"
+    with lat_path.open("w", encoding="utf-8") as handle:
+        for pred in predictions:
+            handle.write(json.dumps({"id": pred["id"], "latency_ms": pred.get("latency_ms")}) + "\n")
+
+    latencies = timing_info.get("latencies_ms", [])
+    if latencies:
+        lat_sorted = sorted(latencies)
+        n = len(lat_sorted)
+
+        def percentile(p: float) -> float:
+            if not lat_sorted:
+                return 0.0
+            k = (n - 1) * (p / 100.0)
+            f = int(k)
+            c = min(f + 1, n - 1)
+            if f == c:
+                return lat_sorted[f]
+            return lat_sorted[f] + (lat_sorted[c] - lat_sorted[f]) * (k - f)
+
+        aggregate.update(
+            {
+                "inference_total_seconds": timing_info.get("total_seconds", 0.0),
+                "inference_latency_ms_avg": sum(latencies) / n,
+                "inference_latency_ms_p50": percentile(50),
+                "inference_latency_ms_p90": percentile(90),
+                "inference_latency_ms_p95": percentile(95),
+                "inference_latency_ms_p99": percentile(99),
+                "latency_file": str(lat_path),
+            }
+        )
 
     predictions_path = experiment_dir / "test_predictions.jsonl"
     metrics_path = experiment_dir / "test_metrics.json"
@@ -1104,12 +1144,18 @@ def main() -> None:
         ],
     )
 
+    timings: Dict[str, float] = {}
+    train_start = time.perf_counter()
     trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
+    timings["train_duration_seconds"] = time.perf_counter() - train_start
     trainer.save_model(str(final_model_dir))
     tokenizer.save_pretrained(final_model_dir)
 
     if args.do_eval and eval_dataset is not None:
+        eval_start = time.perf_counter()
         metrics = trainer.evaluate()
+        timings["eval_duration_seconds"] = time.perf_counter() - eval_start
+        metrics["eval_duration_seconds"] = timings["eval_duration_seconds"]
         print(metrics)
 
     if args.do_test:
@@ -1119,7 +1165,12 @@ def main() -> None:
             args=args,
             experiment_dir=experiment_dir,
         )
+        timings["test_inference_seconds"] = test_metrics.get("inference_total_seconds", 0.0)
         print("Test metrics:", json.dumps(test_metrics, indent=2))
+
+    # persist timing summary
+    timing_path = experiment_dir / "timing.json"
+    timing_path.write_text(json.dumps(timings, indent=2, sort_keys=True))
 
     del trainer
     del model
