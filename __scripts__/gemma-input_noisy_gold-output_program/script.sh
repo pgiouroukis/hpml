@@ -1,0 +1,13 @@
+python scripts/finetune_gemma.py \
+  --output_folder gemma-input_noisy_gold-output_program \
+  --input_mode noisy_gold \
+  --target_field program \
+  --noisy_text_distractors 3 \
+  --noisy_table_distractors 1 \
+  --noisy_context_seed 42 \
+  --do_eval \
+  --do_test \
+  --eval_steps 200 \
+  --per_device_train_batch_size 1 \
+  --num_train_epochs 1 \
+  --gradient_accumulation_steps 4

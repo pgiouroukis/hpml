@@ -1,0 +1,15 @@
+{
+  "execution_accuracy": 0.46817785527462946,
+  "generation_do_sample": false,
+  "generation_max_new_tokens": 128,
+  "generation_num_beams": 1,
+  "generation_temperature": 1.0,
+  "generation_top_p": 1.0,
+  "input_mode": "noisy_gold",
+  "max_seq_length": 1024,
+  "output_jsonl": "__output__/gemma-input_noisy_gold-output_program/test_predictions.jsonl",
+  "program_accuracy": 0.43766346992153443,
+  "target_field": "program",
+  "test_file": "FinQA/dataset/test.json",
+  "total": 1147
+}

@@ -7,6 +7,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
+import random
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Sequence
@@ -70,7 +71,13 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Optional name for the run directory inside __output__.",
     )
-    parser.add_argument("--input_mode", type=str, choices={"gold", "all"}, default="gold")
+    parser.add_argument(
+        "--input_mode",
+        type=str,
+        choices={"gold", "all", "noisy_gold"},
+        default="gold",
+        help="gold: only annotated evidence; all: full page; noisy_gold: evidence plus distractors.",
+    )
     parser.add_argument(
         "--target_field",
         type=str,
@@ -137,6 +144,24 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use sampling instead of greedy/beam decoding when generating test predictions.",
     )
+    parser.add_argument(
+        "--noisy_text_distractors",
+        type=int,
+        default=3,
+        help="Number of random non-evidence sentences to add in noisy_gold mode (per pre/post section).",
+    )
+    parser.add_argument(
+        "--noisy_table_distractors",
+        type=int,
+        default=1,
+        help="Number of random non-evidence table rows to add in noisy_gold mode.",
+    )
+    parser.add_argument(
+        "--noisy_context_seed",
+        type=int,
+        default=0,
+        help="Base seed to make noisy_gold sampling deterministic per example.",
+    )
     return parser.parse_args()
 
 
@@ -151,23 +176,70 @@ def table_to_lines(table: Sequence[Sequence[str]] | None) -> List[str]:
     return lines
 
 
-def build_context(entry: Dict, mode: str) -> str:
+def _sample_with_noise(
+    lines: Sequence[str],
+    gold_indices: Sequence[int],
+    noise_k: int,
+    rng: random.Random,
+) -> List[str]:
+    if not lines:
+        return []
+    gold_set = set(gold_indices)
+    pool = [idx for idx in range(len(lines)) if idx not in gold_set]
+    noise = rng.sample(pool, min(noise_k, len(pool))) if noise_k > 0 else []
+    keep = sorted(gold_set.union(noise))
+    return [lines[idx] for idx in keep]
+
+
+def build_context(
+    entry: Dict,
+    mode: str,
+    noisy_text_distractors: int = 0,
+    noisy_table_distractors: int = 0,
+    noisy_seed: int = 0,
+    example_index: int = 0,
+) -> str:
     qa = entry["qa"]
     if mode == "gold":
         gold = qa.get("gold_inds") or {}
         ordered = [gold[key].strip() for key in sorted(gold)]
         if ordered:
             return "\n".join(ordered)
-    parts: List[str] = []
+
     pre = entry.get("pre_text") or []
     post = entry.get("post_text") or []
-    table = table_to_lines(entry.get("table"))
-    if pre:
-        parts.append("PRE TEXT:\n" + "\n".join(pre))
-    if table:
-        parts.append("TABLE:\n" + "\n".join(table))
-    if post:
-        parts.append("POST TEXT:\n" + "\n".join(post))
+    table_lines = table_to_lines(entry.get("table"))
+
+    # Default: full context
+    if mode == "all":
+        parts: List[str] = []
+        if pre:
+            parts.append("PRE TEXT:\n" + "\n".join(pre))
+        if table_lines:
+            parts.append("TABLE:\n" + "\n".join(table_lines))
+        if post:
+            parts.append("POST TEXT:\n" + "\n".join(post))
+        return "\n\n".join(parts) if parts else "No additional context provided."
+
+    # noisy_gold
+    rng = random.Random(noisy_seed + example_index)
+    gold_text_rows: List[int] = qa.get("ann_text_rows") or []
+    gold_table_rows: List[int] = qa.get("ann_table_rows") or []
+    pre_len = len(pre)
+    pre_gold = [idx for idx in gold_text_rows if idx < pre_len]
+    post_gold = [idx - pre_len for idx in gold_text_rows if idx >= pre_len]
+
+    pre_lines = _sample_with_noise(pre, pre_gold, noisy_text_distractors, rng)
+    post_lines = _sample_with_noise(post, post_gold, noisy_text_distractors, rng)
+    table_selected = _sample_with_noise(table_lines, gold_table_rows, noisy_table_distractors, rng)
+
+    parts: List[str] = []
+    if pre_lines:
+        parts.append("PRE TEXT:\n" + "\n".join(pre_lines))
+    if table_selected:
+        parts.append("TABLE:\n" + "\n".join(table_selected))
+    if post_lines:
+        parts.append("POST TEXT:\n" + "\n".join(post_lines))
     return "\n\n".join(parts) if parts else "No additional context provided."
 
 
@@ -231,24 +303,36 @@ class FinQADataset(Dataset):
         target_field: str,
         task_instruction: str,
         max_samples: int = 0,
+        noisy_text_distractors: int = 0,
+        noisy_table_distractors: int = 0,
+        noisy_context_seed: int = 0,
     ):
         raw_data = json.loads(Path(path).read_text())
         if max_samples:
             raw_data = raw_data[:max_samples]
         hint = resolve_task_hint(target_field, task_instruction)
-        self.features = [
-            encode_example(
-                tokenizer=tokenizer,
-                prompt=build_prompt(
-                    entry["qa"]["question"],
-                    build_context(entry, input_mode),
-                    hint,
-                ),
-                target=extract_target(entry["qa"], target_field),
-                max_length=max_length,
+        self.features = []
+        for idx, entry in enumerate(raw_data):
+            context = build_context(
+                entry,
+                input_mode,
+                noisy_text_distractors=noisy_text_distractors,
+                noisy_table_distractors=noisy_table_distractors,
+                noisy_seed=noisy_context_seed,
+                example_index=idx,
             )
-            for entry in raw_data
-        ]
+            self.features.append(
+                encode_example(
+                    tokenizer=tokenizer,
+                    prompt=build_prompt(
+                        entry["qa"]["question"],
+                        context,
+                        hint,
+                    ),
+                    target=extract_target(entry["qa"], target_field),
+                    max_length=max_length,
+                )
+            )
 
     def __len__(self) -> int:
         return len(self.features)
@@ -613,14 +697,24 @@ def build_generation_entries(
     input_mode: str,
     target_field: str,
     task_instruction: str,
+    noisy_text_distractors: int = 0,
+    noisy_table_distractors: int = 0,
+    noisy_context_seed: int = 0,
 ) -> List[Dict]:
     hint = resolve_task_hint(target_field, task_instruction)
     entries: List[Dict] = []
-    for entry in data:
+    for idx, entry in enumerate(data):
         qa = entry["qa"]
         prompt = build_prompt(
             qa["question"],
-            build_context(entry, input_mode),
+            build_context(
+                entry,
+                input_mode,
+                noisy_text_distractors=noisy_text_distractors,
+                noisy_table_distractors=noisy_table_distractors,
+                noisy_seed=noisy_context_seed,
+                example_index=idx,
+            ),
             hint,
         )
         entries.append(
@@ -743,6 +837,9 @@ def run_test_evaluation(model, tokenizer, args: argparse.Namespace, experiment_d
         input_mode=args.input_mode,
         target_field=args.target_field,
         task_instruction=args.task_instruction,
+        noisy_text_distractors=args.noisy_text_distractors,
+        noisy_table_distractors=args.noisy_table_distractors,
+        noisy_context_seed=args.noisy_context_seed,
     )
     generation_kwargs = {
         "max_new_tokens": args.generation_max_new_tokens,
@@ -939,6 +1036,9 @@ def main() -> None:
         target_field=args.target_field,
         task_instruction=args.task_instruction,
         max_samples=args.max_train_samples,
+        noisy_text_distractors=args.noisy_text_distractors,
+        noisy_table_distractors=args.noisy_table_distractors,
+        noisy_context_seed=args.noisy_context_seed,
     )
 
     eval_dataset = (
@@ -950,6 +1050,9 @@ def main() -> None:
             target_field=args.target_field,
             task_instruction=args.task_instruction,
             max_samples=args.max_eval_samples,
+            noisy_text_distractors=args.noisy_text_distractors,
+            noisy_table_distractors=args.noisy_table_distractors,
+            noisy_context_seed=args.noisy_context_seed,
         )
         if args.do_eval
         else None
