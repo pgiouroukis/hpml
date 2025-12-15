@@ -19,6 +19,7 @@ from sympy import simplify
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
+    BitsAndBytesConfig,
     PreTrainedTokenizerBase,
     Trainer,
     TrainerCallback,
@@ -61,8 +62,57 @@ def str2bool(value: str) -> bool:
     raise argparse.ArgumentTypeError(f"cannot interpret boolean value: {value}")
 
 
+def split_csv(value: str) -> List[str]:
+    if not value:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def resolve_bnb_compute_dtype(args: argparse.Namespace) -> torch.dtype:
+    mapping = {
+        "bf16": torch.bfloat16,
+        "fp16": torch.float16,
+        "fp32": torch.float32,
+    }
+    requested = getattr(args, "bnb_4bit_compute_dtype", "auto")
+    if requested in mapping:
+        return mapping[requested]
+    if getattr(args, "bf16", False):
+        return torch.bfloat16
+    if getattr(args, "fp16", False):
+        return torch.float16
+    return torch.float16
+
+
+def ensure_inputs_require_grads(model) -> None:
+    enable = getattr(model, "enable_input_require_grads", None)
+    if callable(enable):
+        enable()
+        return
+    base_getter = getattr(model, "get_base_model", None)
+    if callable(base_getter):
+        base_model = base_getter()
+        enable_base = getattr(base_model, "enable_input_require_grads", None)
+        if callable(enable_base):
+            enable_base()
+            return
+    get_embeddings = getattr(model, "get_input_embeddings", None)
+    if not callable(get_embeddings):
+        return
+    embeddings = get_embeddings()
+    if embeddings is None:
+        return
+
+    def _require_grad_hook(module, inputs, output):
+        if isinstance(output, torch.Tensor):
+            output.requires_grad_(True)
+        return output
+
+    embeddings.register_forward_hook(_require_grad_hook)
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Finetune Gemma-3-1B-IT on FinQA.")
+    parser = argparse.ArgumentParser(description="Finetune Gemma on FinQA.")
     parser.add_argument("--model_name", type=str, default="google/gemma-3-1b-it")
     parser.add_argument("--train_file", type=str, default="FinQA/dataset/train.json")
     parser.add_argument("--eval_file", type=str, default="FinQA/dataset/dev.json")
@@ -106,6 +156,54 @@ def parse_args() -> argparse.Namespace:
         default="eager",
     )
     parser.add_argument(
+        "--device_map",
+        type=str,
+        default="",
+        help="Optional Hugging Face device_map for from_pretrained (e.g., 'auto').",
+    )
+    parser.add_argument(
+        "--peft",
+        type=str,
+        choices={"none", "lora", "qlora"},
+        default="none",
+        help="Parameter-efficient finetuning: none=full finetune; lora=LoRA; qlora=4-bit base + LoRA.",
+    )
+    parser.add_argument("--lora_r", type=int, default=16)
+    parser.add_argument("--lora_alpha", type=int, default=32)
+    parser.add_argument("--lora_dropout", type=float, default=0.05)
+    parser.add_argument(
+        "--lora_target_modules",
+        type=str,
+        default="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
+        help="Comma-separated module names to apply LoRA to.",
+    )
+    parser.add_argument(
+        "--lora_bias",
+        type=str,
+        choices={"none", "all", "lora_only"},
+        default="none",
+    )
+    parser.add_argument(
+        "--lora_modules_to_save",
+        type=str,
+        default="",
+        help="Optional comma-separated module names to keep trainable/saved outside LoRA.",
+    )
+    parser.add_argument(
+        "--bnb_4bit_quant_type",
+        type=str,
+        choices={"nf4", "fp4"},
+        default="nf4",
+    )
+    parser.add_argument(
+        "--bnb_4bit_compute_dtype",
+        type=str,
+        choices={"auto", "bf16", "fp16", "fp32"},
+        default="auto",
+        help="Compute dtype for 4-bit quantization (auto uses bf16/fp16 flags, else fp16).",
+    )
+    parser.add_argument("--bnb_4bit_use_double_quant", type=str2bool, default=True)
+    parser.add_argument(
         "--eval_strategy",
         "--evaluation_strategy",
         dest="eval_strategy",
@@ -128,6 +226,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--do_eval", action="store_true")
     parser.add_argument("--load_best_model_at_end", type=str2bool, default=True)
     parser.add_argument("--lr_scheduler_type", type=str, default="cosine")
+    parser.add_argument(
+        "--optim",
+        type=str,
+        default=None,
+        help="Optional TrainingArguments.optim override (e.g., paged_adamw_8bit for QLoRA).",
+    )
     parser.add_argument("--do_test", action="store_true", help="Run FinQA evaluation on the test split.")
     parser.add_argument("--test_file", type=str, default="FinQA/dataset/test.json")
     parser.add_argument("--max_test_samples", type=int, default=0)
@@ -1143,13 +1247,80 @@ def main() -> None:
         else None
     )
 
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_name, attn_implementation=args.attn_implementation
-    )
+    torch_dtype = None
+    if args.bf16:
+        torch_dtype = torch.bfloat16
+    elif args.fp16:
+        torch_dtype = torch.float16
+
+    device_map = (args.device_map or "").strip() or None
+    quantization_config = None
+    if args.peft == "qlora":
+        if not (args.bf16 or args.fp16):
+            print(
+                "Warning: --peft qlora without --bf16/--fp16; defaulting 4-bit compute dtype to fp16."
+            )
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type=args.bnb_4bit_quant_type,
+            bnb_4bit_use_double_quant=args.bnb_4bit_use_double_quant,
+            bnb_4bit_compute_dtype=resolve_bnb_compute_dtype(args),
+        )
+        if device_map is None:
+            device_map = "auto"
+
+    model_kwargs = {"attn_implementation": args.attn_implementation}
+    if torch_dtype is not None:
+        model_kwargs["torch_dtype"] = torch_dtype
+    if device_map is not None:
+        model_kwargs["device_map"] = device_map
+    if quantization_config is not None:
+        model_kwargs["quantization_config"] = quantization_config
+
+    model = AutoModelForCausalLM.from_pretrained(args.model_name, **model_kwargs)
     model.resize_token_embeddings(len(tokenizer))
+
+    if args.peft in {"lora", "qlora"}:
+        try:
+            from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training
+        except ImportError as exc:  # pragma: no cover - optional dependency
+            raise RuntimeError(
+                "PEFT is required for --peft lora/qlora. Install `peft`."
+            ) from exc
+
+        if args.peft == "qlora":
+            model = prepare_model_for_kbit_training(
+                model,
+                use_gradient_checkpointing=args.gradient_checkpointing,
+            )
+
+        lora_targets = split_csv(args.lora_target_modules)
+        if not lora_targets:
+            raise ValueError("--lora_target_modules must be non-empty when using --peft lora/qlora.")
+        modules_to_save = split_csv(args.lora_modules_to_save)
+        lora_config = LoraConfig(
+            r=args.lora_r,
+            lora_alpha=args.lora_alpha,
+            lora_dropout=args.lora_dropout,
+            target_modules=lora_targets,
+            bias=args.lora_bias,
+            task_type=TaskType.CAUSAL_LM,
+            modules_to_save=modules_to_save or None,
+        )
+        model = get_peft_model(model, lora_config)
+        try:
+            model.print_trainable_parameters()
+        except Exception:
+            pass
+
     if args.gradient_checkpointing:
-        model.gradient_checkpointing_enable()
+        if args.peft != "qlora":
+            model.gradient_checkpointing_enable()
         model.config.use_cache = False
+        if args.peft in {"lora", "qlora"}:
+            # PEFT commonly freezes the base model; with gradient checkpointing this can
+            # break autograd unless the embedding outputs require grads.
+            ensure_inputs_require_grads(model)
 
     report_to = "none"
     wandb_run = None
@@ -1181,7 +1352,7 @@ def main() -> None:
             except Exception:
                 pass
 
-    training_args = TrainingArguments(
+    training_kwargs = dict(
         output_dir=str(experiment_dir),
         num_train_epochs=args.num_train_epochs,
         per_device_train_batch_size=args.per_device_train_batch_size,
@@ -1203,6 +1374,9 @@ def main() -> None:
         report_to=report_to,
         load_best_model_at_end=args.load_best_model_at_end and args.do_eval,
     )
+    if args.optim:
+        training_kwargs["optim"] = args.optim
+    training_args = TrainingArguments(**training_kwargs)
 
     trainer = Trainer(
         model=model,

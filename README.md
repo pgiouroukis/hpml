@@ -1,6 +1,6 @@
 # FinQA Gemma Finetuning Utilities
 
-This repository contains scripts to finetune Gemma-3-1B-IT on the FinQA dataset, generate FinQA DSL programs or numeric answers, and evaluate execution accuracy. It also includes utilities for noisy-evidence training and runtime tracking.
+This repository contains scripts to finetune Gemma models (e.g., Gemma-3-1B-IT and Gemma-3-4B-IT) on the FinQA dataset, generate FinQA DSL programs or numeric answers, and evaluate execution accuracy. It also includes utilities for noisy-evidence training and runtime tracking.
 
 ## Key scripts
 - `scripts/finetune_gemma.py`: Main training/eval driver.
@@ -14,6 +14,12 @@ This repository contains scripts to finetune Gemma-3-1B-IT on the FinQA dataset,
     - `--noisy_text_distractors`: number of non-evidence pre/post sentences to add.
     - `--noisy_table_distractors`: number of non-evidence table rows to add.
     - `--noisy_context_seed`: base seed for deterministic sampling per example.
+  - Model knobs:
+    - `--model_name`: Hugging Face id or local path (e.g., `google/gemma-3-1b-it`, `google/gemma-3-4b-it`).
+    - `--peft none|lora|qlora`: full finetune vs LoRA vs 4-bit QLoRA (recommended for 4B).
+    - LoRA knobs: `--lora_r`, `--lora_alpha`, `--lora_dropout`, `--lora_target_modules`.
+    - QLoRA knobs: `--bnb_4bit_quant_type`, `--bnb_4bit_compute_dtype`, `--bnb_4bit_use_double_quant`.
+    - Optional `--optim` override (e.g., `paged_adamw_8bit`).
   - Generation knobs: `--generation_max_new_tokens`, `--generation_num_beams`, `--generation_temperature`, `--generation_top_p`, `--generation_do_sample`.
   - Training knobs: standard HF Trainer arguments (epochs, LR, batch sizes, accumulation, scheduler, precision, etc.).
   - Outputs per run (under `__output__/.../`):
@@ -41,12 +47,18 @@ This repository contains scripts to finetune Gemma-3-1B-IT on the FinQA dataset,
 - `gemma-input_noisy_gold-output_program/script.sh`: DSL training/eval with noisy-gold context (`input_mode noisy_gold`, distractor defaults set).
 - `gemma-input_gold-output_numerical/script.sh`: Oracle-evidence numeric-answer training/eval (`input_mode gold`, `target_field numerical`).
 - `gemma-input_all-output_numerical/script.sh`: Full-context numeric-answer training/eval (`input_mode all`, `target_field numerical`).
+- `gemma3-4b-qlora-input_gold-output_program/script.sh`: Gemma-3-4B-IT QLoRA DSL training/eval (`input_mode gold`, `target_field program`).
+- `gemma3-4b-qlora-input_all-output_program/script.sh`: Gemma-3-4B-IT QLoRA DSL training/eval (`input_mode all`, `target_field program`).
+- `gemma3-4b-qlora-input_noisy_gold-output_program/script.sh`: Gemma-3-4B-IT QLoRA DSL training/eval (`input_mode noisy_gold`, distractor defaults set).
+- `gemma3-4b-qlora-input_gold-output_numerical/script.sh`: Gemma-3-4B-IT QLoRA numeric-answer training/eval (`input_mode gold`, `target_field numerical`).
+- `gemma3-4b-qlora-input_all-output_numerical/script.sh`: Gemma-3-4B-IT QLoRA numeric-answer training/eval (`input_mode all`, `target_field numerical`).
 
 Run any script with `bash __scripts__/<run>/script.sh`. Outputs land under `__output__/<matching-name>*/`.
 
 ## Typical adjustments
 - Shorten/expand context: switch `--input_mode` or adjust distractor counts.
 - Precision: set `--bf16 true` or `--fp16 true` if your hardware supports it.
+- Large models: use `--peft qlora` (and optionally `--optim paged_adamw_8bit`) to make Gemma-3-4B fit on a single GPU.
 - Training budget: bump `--num_train_epochs`, `--per_device_train_batch_size`, or adjust `--learning_rate` as needed.
 - Decoding: tweak beam/sampling settings via generation flags.
 
