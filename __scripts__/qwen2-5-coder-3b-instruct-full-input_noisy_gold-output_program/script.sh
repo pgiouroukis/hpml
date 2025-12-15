@@ -1,0 +1,23 @@
+python scripts/finetune_gemma.py \
+  --model_name Qwen/Qwen2.5-Coder-3B-Instruct \
+  --peft none \
+  --bf16 true \
+  --optim paged_adamw_8bit \
+  --output_folder qwen2-5-coder-3b-instruct-full-input_noisy_gold-output_program \
+  --input_mode noisy_gold \
+  --target_field program \
+  --attn_implementation sdpa \
+  --noisy_text_distractors 3 \
+  --noisy_table_distractors 1 \
+  --noisy_context_seed 42 \
+  --do_eval \
+  --do_test \
+  --eval_steps 200 \
+  --per_device_train_batch_size 1 \
+  --num_train_epochs 1 \
+  --gradient_accumulation_steps 4 \
+  --wandb_project finqa-gemma \
+  --wandb_mode online \
+  --wandb_run_name "Qwen2.5-Coder-3B full | DSL | input=noisy_gold | 1ep" \
+  --wandb_id "" \
+  --wandb_resume never

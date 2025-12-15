@@ -1250,7 +1250,9 @@ def main() -> None:
     torch_dtype = None
     if args.bf16:
         torch_dtype = torch.bfloat16
-    elif args.fp16:
+    elif args.fp16 and args.peft in {"lora", "qlora"}:
+        # When doing PEFT, keeping frozen base weights in fp16 reduces VRAM.
+        # For full finetuning, let AMP manage precision (fp32 weights + fp16 compute) to avoid GradScaler issues.
         torch_dtype = torch.float16
 
     device_map = (args.device_map or "").strip() or None

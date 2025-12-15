@@ -1,0 +1,20 @@
+python scripts/finetune_gemma.py \
+  --model_name Qwen/Qwen2.5-Coder-3B-Instruct \
+  --peft none \
+  --bf16 true \
+  --optim paged_adamw_8bit \
+  --output_folder qwen2-5-coder-3b-instruct-full-input_all-output_program \
+  --input_mode all \
+  --target_field program \
+  --attn_implementation sdpa \
+  --do_eval \
+  --do_test \
+  --eval_steps 200 \
+  --per_device_train_batch_size 1 \
+  --num_train_epochs 1 \
+  --gradient_accumulation_steps 4 \
+  --wandb_project finqa-gemma \
+  --wandb_mode online \
+  --wandb_run_name "Qwen2.5-Coder-3B full | DSL | input=all | 1ep" \
+  --wandb_id "" \
+  --wandb_resume never

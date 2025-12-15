@@ -1,6 +1,6 @@
-# FinQA Gemma Finetuning Utilities
+# FinQA Finetuning Utilities
 
-This repository contains scripts to finetune Gemma models (e.g., Gemma-3-1B-IT and Gemma-3-4B-IT) on the FinQA dataset, generate FinQA DSL programs or numeric answers, and evaluate execution accuracy. It also includes utilities for noisy-evidence training and runtime tracking.
+This repository contains scripts to finetune instruction-tuned causal LMs (e.g., Gemma and Qwen) on the FinQA dataset, generate FinQA DSL programs or numeric answers, and evaluate execution accuracy. It also includes utilities for noisy-evidence training and runtime tracking.
 
 ## Key scripts
 - `scripts/finetune_gemma.py`: Main training/eval driver.
@@ -15,7 +15,7 @@ This repository contains scripts to finetune Gemma models (e.g., Gemma-3-1B-IT a
     - `--noisy_table_distractors`: number of non-evidence table rows to add.
     - `--noisy_context_seed`: base seed for deterministic sampling per example.
   - Model knobs:
-    - `--model_name`: Hugging Face id or local path (e.g., `google/gemma-3-1b-it`, `google/gemma-3-4b-it`).
+    - `--model_name`: Hugging Face id or local path (e.g., `google/gemma-3-1b-it`, `google/gemma-3-4b-it`, `Qwen/Qwen2.5-Coder-3B-Instruct`).
     - `--peft none|lora|qlora`: full finetune vs LoRA vs 4-bit QLoRA (recommended for 4B).
     - LoRA knobs: `--lora_r`, `--lora_alpha`, `--lora_dropout`, `--lora_target_modules`.
     - QLoRA knobs: `--bnb_4bit_quant_type`, `--bnb_4bit_compute_dtype`, `--bnb_4bit_use_double_quant`.
@@ -52,6 +52,11 @@ This repository contains scripts to finetune Gemma models (e.g., Gemma-3-1B-IT a
 - `gemma3-4b-qlora-input_noisy_gold-output_program/script.sh`: Gemma-3-4B-IT QLoRA DSL training/eval (`input_mode noisy_gold`, distractor defaults set).
 - `gemma3-4b-qlora-input_gold-output_numerical/script.sh`: Gemma-3-4B-IT QLoRA numeric-answer training/eval (`input_mode gold`, `target_field numerical`).
 - `gemma3-4b-qlora-input_all-output_numerical/script.sh`: Gemma-3-4B-IT QLoRA numeric-answer training/eval (`input_mode all`, `target_field numerical`).
+- `qwen2-5-coder-3b-instruct-full-input_gold-output_program/script.sh`: Qwen2.5-Coder-3B full finetune DSL training/eval (`input_mode gold`, `target_field program`).
+- `qwen2-5-coder-3b-instruct-full-input_all-output_program/script.sh`: Qwen2.5-Coder-3B full finetune DSL training/eval (`input_mode all`, `target_field program`).
+- `qwen2-5-coder-3b-instruct-full-input_noisy_gold-output_program/script.sh`: Qwen2.5-Coder-3B full finetune DSL training/eval (`input_mode noisy_gold`, distractor defaults set).
+- `qwen2-5-coder-3b-instruct-full-input_gold-output_numerical/script.sh`: Qwen2.5-Coder-3B full finetune numeric-answer training/eval (`input_mode gold`, `target_field numerical`).
+- `qwen2-5-coder-3b-instruct-full-input_all-output_numerical/script.sh`: Qwen2.5-Coder-3B full finetune numeric-answer training/eval (`input_mode all`, `target_field numerical`).
 
 Run any script with `bash __scripts__/<run>/script.sh`. Outputs land under `__output__/<matching-name>*/`.
 
