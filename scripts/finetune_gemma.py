@@ -885,10 +885,57 @@ def generate_predictions_for_entries(
     max_seq_length: int,
     generation_kwargs: Dict,
 ) -> tuple[List[Dict], Dict[str, float]]:
+    def _maybe_patch_gemma3_attention_dtype_mismatch() -> None:
+        try:
+            model_type = getattr(getattr(model, "config", None), "model_type", "") or ""
+        except Exception:
+            model_type = ""
+        if model_type != "gemma3":
+            return
+        try:
+            from transformers.models.gemma3 import modeling_gemma3
+        except Exception:
+            return
+        if getattr(modeling_gemma3, "_finqa_dtype_patch_applied", False):
+            return
+
+        original = modeling_gemma3.eager_attention_forward
+
+        def patched_eager_attention_forward(
+            module,
+            query: torch.Tensor,
+            key: torch.Tensor,
+            value: torch.Tensor,
+            attention_mask: Optional[torch.Tensor],
+            dropout: float = 0.0,
+            scaling: Optional[float] = None,
+            softcap: Optional[float] = None,
+            **kwargs,
+        ):
+            if key.dtype != query.dtype:
+                key = key.to(query.dtype)
+            if value.dtype != query.dtype:
+                value = value.to(query.dtype)
+            return original(
+                module,
+                query,
+                key,
+                value,
+                attention_mask,
+                dropout=dropout,
+                scaling=scaling,
+                softcap=softcap,
+                **kwargs,
+            )
+
+        modeling_gemma3.eager_attention_forward = patched_eager_attention_forward
+        modeling_gemma3._finqa_dtype_patch_applied = True
+
     device = model.device if hasattr(model, "device") else torch.device("cpu")
     if getattr(model.config, "use_cache", None) is False:
         model.config.use_cache = True
     model.eval()
+    _maybe_patch_gemma3_attention_dtype_mismatch()
     predictions: List[Dict] = []
     latencies_ms: List[float] = []
     overall_start = time.perf_counter()
