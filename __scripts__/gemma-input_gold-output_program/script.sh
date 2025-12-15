@@ -7,4 +7,9 @@ python scripts/finetune_gemma.py \
   --eval_steps 200 \
   --per_device_train_batch_size 1 \
   --num_train_epochs 1 \
-  --gradient_accumulation_steps 4
+  --gradient_accumulation_steps 4 \
+  --wandb_project finqa-gemma \
+  --wandb_mode online \
+  --wandb_run_name "Gemma DSL | input=gold | 1ep" \
+  --wandb_id "" \
+  --wandb_resume never

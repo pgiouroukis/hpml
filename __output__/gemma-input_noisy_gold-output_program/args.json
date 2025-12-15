@@ -41,6 +41,13 @@
   "task_instruction": "",
   "test_file": "FinQA/dataset/test.json",
   "train_file": "FinQA/dataset/train.json",
+  "wandb_group": "",
+  "wandb_id": "gemma-input_noisy_gold-output_program",
+  "wandb_mode": "online",
+  "wandb_project": "finqa-gemma",
+  "wandb_resume": "allow",
+  "wandb_run_name": "Gemma DSL | input=noisy_gold | 1ep",
+  "wandb_tags": "",
   "warmup_ratio": 0.03,
   "weight_decay": 0.01
 }

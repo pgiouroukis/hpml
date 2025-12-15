@@ -90,7 +90,8 @@ def build_context(
 
 
 def extract_target(qa: Dict, field: str) -> str:
-    target = qa.get(field, "")
+    field_key = "exe_ans" if field == "numerical" else field
+    target = qa.get(field_key, "")
     if isinstance(target, list):
         target = " ".join(target)
     if not target:
@@ -125,8 +126,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--target_field",
-        choices={"program", "exe_ans", "answer"},
-        default="exe_ans",
+        choices={"program", "numerical", "answer"},
+        default="numerical",
     )
     parser.add_argument("--task_instruction", type=str, default="")
     parser.add_argument("--max_samples", type=int, default=0, help="Limit number of examples processed.")

@@ -18,7 +18,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--test_file", type=str, default="FinQA/dataset/test.json")
     parser.add_argument("--max_test_samples", type=int, default=0)
     parser.add_argument("--input_mode", type=str, choices={"gold", "all"}, default="gold")
-    parser.add_argument("--target_field", type=str, choices={"program", "exe_ans", "answer"}, default="program")
+    parser.add_argument("--target_field", type=str, choices={"program", "numerical", "answer"}, default="program")
     parser.add_argument("--task_instruction", type=str, default="")
     parser.add_argument("--max_seq_length", type=int, default=1024)
     parser.add_argument("--generation_max_new_tokens", type=int, default=128)

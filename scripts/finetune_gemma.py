@@ -82,7 +82,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--target_field",
         type=str,
-        choices={"program", "exe_ans", "answer"},
+        choices={"program", "numerical", "answer"},
         default="program",
     )
     parser.add_argument("--task_instruction", type=str, default="")
@@ -162,6 +162,50 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=0,
         help="Base seed to make noisy_gold sampling deterministic per example.",
+    )
+    parser.add_argument(
+        "--wandb_project",
+        type=str,
+        default="",
+        help="If set, enable Weights & Biases logging with this project name.",
+    )
+    parser.add_argument(
+        "--wandb_run_name",
+        type=str,
+        default="",
+        help="Optional W&B run name (otherwise auto-generated).",
+    )
+    parser.add_argument(
+        "--wandb_group",
+        type=str,
+        default="",
+        help="Optional W&B group name for aggregating related runs.",
+    )
+    parser.add_argument(
+        "--wandb_tags",
+        type=str,
+        default="",
+        help="Comma-separated W&B tags.",
+    )
+    parser.add_argument(
+        "--wandb_mode",
+        type=str,
+        choices={"online", "offline", "disabled"},
+        default="disabled",
+        help="W&B logging mode (disabled by default).",
+    )
+    parser.add_argument(
+        "--wandb_id",
+        type=str,
+        default="",
+        help="Optional fixed W&B run id (set to resume/replace the same run). Defaults to a slug of output_folder.",
+    )
+    parser.add_argument(
+        "--wandb_resume",
+        type=str,
+        choices={"allow", "must", "never"},
+        default="allow",
+        help="W&B resume policy when using a fixed id.",
     )
     return parser.parse_args()
 
@@ -251,7 +295,8 @@ def build_prompt(question: str, context: str, hint: str) -> str:
 
 
 def extract_target(qa: Dict, field: str) -> str:
-    target = qa.get(field, "")
+    field_key = "exe_ans" if field == "numerical" else field
+    target = qa.get(field_key, "")
     if isinstance(target, list):
         target = " ".join(target)
     if not target:
@@ -651,14 +696,14 @@ def clean_prediction_text(text: str, eos_token: str | None = None) -> str:
 def evaluate_program_prediction(
     prediction: str,
     gold_program: str,
-    gold_exe_ans,
+    gold_numerical,
     table: Sequence[Sequence[str]] | None,
 ) -> Dict:
     pred_tokens = program_tokenization(prediction)
     gold_tokens = program_tokenization(gold_program)
     invalid_flag, exe_res = eval_program(pred_tokens, table or [])
     exec_error = None
-    execution_accuracy = invalid_flag == 0 and exe_res == gold_exe_ans
+    execution_accuracy = invalid_flag == 0 and exe_res == gold_numerical
     try:
         program_accuracy = equal_program(gold_tokens, pred_tokens)
     except Exception as exc:  # pragma: no cover - defensive
@@ -666,10 +711,10 @@ def evaluate_program_prediction(
         exec_error = f"program_equivalence_failed: {exc}"
     if invalid_flag:
         exec_error = exec_error or "invalid program or execution failure"
-    if program_accuracy and invalid_flag == 0 and exe_res != gold_exe_ans:
+    if program_accuracy and invalid_flag == 0 and exe_res != gold_numerical:
         exec_error = exec_error or "equivalent program but execution mismatch"
     return {
-        "predicted_exe_ans": None if invalid_flag else exe_res,
+        "predicted_numerical": None if invalid_flag else exe_res,
         "execution_accuracy": execution_accuracy,
         "program_accuracy": program_accuracy,
         "execution_error": exec_error,
@@ -795,18 +840,18 @@ def score_predictions(
         }
         if target_field == "program":
             gold_program = qa.get("program", "")
-            gold_exe_ans = qa.get("exe_ans")
+            gold_numerical = qa.get("exe_ans")
             metrics = evaluate_program_prediction(
                 prediction=item["prediction"],
                 gold_program=gold_program,
-                gold_exe_ans=gold_exe_ans,
+                gold_numerical=gold_numerical,
                 table=item.get("table") or [],
             )
             base_record.update(
                 {
                     "gold_program": gold_program,
-                    "gold_exe_ans": gold_exe_ans,
-                    "predicted_exe_ans": metrics["predicted_exe_ans"],
+                    "gold_numerical": gold_numerical,
+                    "predicted_numerical": metrics["predicted_numerical"],
                     "execution_accuracy": metrics["execution_accuracy"],
                     "program_accuracy": metrics["program_accuracy"],
                     "execution_error": metrics["execution_error"],
@@ -1106,6 +1151,36 @@ def main() -> None:
         model.gradient_checkpointing_enable()
         model.config.use_cache = False
 
+    report_to = "none"
+    wandb_run = None
+    use_wandb = args.wandb_mode != "disabled" and bool(args.wandb_project)
+    if use_wandb:
+        try:
+            import wandb
+        except ImportError:  # pragma: no cover - optional dependency
+            wandb = None
+            use_wandb = False
+        if wandb is not None:
+            report_to = "wandb"
+            run_tags = [tag.strip() for tag in args.wandb_tags.split(",") if tag.strip()]
+            default_id = args.wandb_id or None
+            resume_policy = args.wandb_resume if default_id else None
+            wandb_run = wandb.init(
+                project=args.wandb_project,
+                name=args.wandb_run_name or None,
+                group=args.wandb_group or None,
+                tags=run_tags or None,
+                mode=args.wandb_mode,
+                config=args_dict,
+                id=default_id,
+                resume=resume_policy,
+            )
+            # Ensure hyperparameters are attached/updated even on resume.
+            try:
+                wandb_run.config.update(args_dict, allow_val_change=True)
+            except Exception:
+                pass
+
     training_args = TrainingArguments(
         output_dir=str(experiment_dir),
         num_train_epochs=args.num_train_epochs,
@@ -1125,7 +1200,7 @@ def main() -> None:
         fp16=args.fp16,
         gradient_checkpointing=args.gradient_checkpointing,
         lr_scheduler_type=args.lr_scheduler_type,
-        report_to="none",
+        report_to=report_to,
         load_best_model_at_end=args.load_best_model_at_end and args.do_eval,
     )
 
@@ -1148,6 +1223,8 @@ def main() -> None:
     train_start = time.perf_counter()
     trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
     timings["train_duration_seconds"] = time.perf_counter() - train_start
+    if wandb_run is not None:
+        wandb_run.log({"train_duration_seconds": timings["train_duration_seconds"]})
     trainer.save_model(str(final_model_dir))
     tokenizer.save_pretrained(final_model_dir)
 
@@ -1157,6 +1234,8 @@ def main() -> None:
         timings["eval_duration_seconds"] = time.perf_counter() - eval_start
         metrics["eval_duration_seconds"] = timings["eval_duration_seconds"]
         print(metrics)
+        if wandb_run is not None:
+            wandb_run.log(metrics)
 
     if args.do_test:
         test_metrics = run_test_evaluation(
@@ -1167,6 +1246,27 @@ def main() -> None:
         )
         timings["test_inference_seconds"] = test_metrics.get("inference_total_seconds", 0.0)
         print("Test metrics:", json.dumps(test_metrics, indent=2))
+        if wandb_run is not None:
+            wandb_run.log(test_metrics)
+            try:
+                latencies: List[float] = []
+                lat_path = Path(test_metrics.get("latency_file", ""))
+                if lat_path and lat_path.exists():
+                    with lat_path.open() as handle:
+                        for line in handle:
+                            rec = json.loads(line)
+                            val = rec.get("latency_ms")
+                            if isinstance(val, (int, float)):
+                                latencies.append(float(val))
+                if latencies:
+                    wandb_run.log({"test_inference_latency_ms": wandb.Histogram(latencies)})
+            except Exception:  # pragma: no cover - logging best-effort
+                pass
+        if torch.cuda.is_available():
+            timings["cuda_max_memory_bytes"] = torch.cuda.max_memory_allocated()
+
+    if torch.cuda.is_available():
+        timings.setdefault("cuda_max_memory_bytes", torch.cuda.max_memory_allocated())
 
     # persist timing summary
     timing_path = experiment_dir / "timing.json"
@@ -1178,6 +1278,12 @@ def main() -> None:
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.ipc_collect()
+
+    if wandb_run is not None:
+        try:
+            wandb_run.finish()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

@@ -1,0 +1,22 @@
+{
+  "execution_accuracy": 0.46817785527462946,
+  "generation_do_sample": false,
+  "generation_max_new_tokens": 128,
+  "generation_num_beams": 1,
+  "generation_temperature": 1.0,
+  "generation_top_p": 1.0,
+  "inference_latency_ms_avg": 344.5793943885233,
+  "inference_latency_ms_p50": 305.442385841161,
+  "inference_latency_ms_p90": 507.7898871619257,
+  "inference_latency_ms_p95": 554.5606130035594,
+  "inference_latency_ms_p99": 753.6344366101544,
+  "inference_total_seconds": 396.94709689100273,
+  "input_mode": "noisy_gold",
+  "latency_file": "__output__/gemma-input_noisy_gold-output_program--4/test_inference_latencies.jsonl",
+  "max_seq_length": 1024,
+  "output_jsonl": "__output__/gemma-input_noisy_gold-output_program--4/test_predictions.jsonl",
+  "program_accuracy": 0.43766346992153443,
+  "target_field": "program",
+  "test_file": "FinQA/dataset/test.json",
+  "total": 1147
+}

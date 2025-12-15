@@ -1,0 +1,15 @@
+python scripts/finetune_gemma.py \
+  --output_folder gemma-input_all-output_numerical \
+  --input_mode all \
+  --target_field numerical \
+  --do_eval \
+  --do_test \
+  --eval_steps 200 \
+  --per_device_train_batch_size 1 \
+  --num_train_epochs 1 \
+  --gradient_accumulation_steps 4 \
+  --wandb_project finqa-gemma \
+  --wandb_mode online \
+  --wandb_run_name "Gemma numerical | input=all | 1ep" \
+  --wandb_id "" \
+  --wandb_resume never

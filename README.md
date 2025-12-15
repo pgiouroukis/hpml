@@ -5,7 +5,7 @@ This repository contains scripts to finetune Gemma-3-1B-IT on the FinQA dataset,
 ## Key scripts
 - `scripts/finetune_gemma.py`: Main training/eval driver.
   - Modes:
-    - `--target_field program|exe_ans|answer` (DSL program vs executed answer vs raw answer string).
+    - `--target_field program|numerical|answer` (DSL program vs executed numeric answer vs raw answer string).
     - `--input_mode gold|all|noisy_gold`:
       - `gold`: only annotated evidence (`gold_inds`); oracle context.
       - `all`: full pre_text/table/post_text.
@@ -32,11 +32,15 @@ This repository contains scripts to finetune Gemma-3-1B-IT on the FinQA dataset,
 - Test inference:
   - Per-sample latency (ms) is stored in `test_predictions.jsonl` and in `test_inference_latencies.jsonl`.
   - Aggregates in `test_metrics.json`: `inference_total_seconds`, `inference_latency_ms_{avg,p50,p90,p95,p99}`, and pointer to `latency_file`.
+- GPU memory: `cuda_max_memory_bytes` is recorded in `timing.json` when CUDA is available.
+- Optional W&B logging: set `--wandb_project` and `--wandb_mode` to log all metrics (train/eval/test, timings, latency histogram) to Weights & Biases.
 
 ## Ready-made run scripts (`__scripts__/`)
 - `gemma-input_gold-output_program/script.sh`: Oracle-evidence DSL training/eval (`input_mode gold`, `target_field program`).
 - `gemma-input_all-output_program/script.sh`: Full-context DSL training/eval (`input_mode all`, `target_field program`).
 - `gemma-input_noisy_gold-output_program/script.sh`: DSL training/eval with noisy-gold context (`input_mode noisy_gold`, distractor defaults set).
+- `gemma-input_gold-output_numerical/script.sh`: Oracle-evidence numeric-answer training/eval (`input_mode gold`, `target_field numerical`).
+- `gemma-input_all-output_numerical/script.sh`: Full-context numeric-answer training/eval (`input_mode all`, `target_field numerical`).
 
 Run any script with `bash __scripts__/<run>/script.sh`. Outputs land under `__output__/<matching-name>*/`.
 
