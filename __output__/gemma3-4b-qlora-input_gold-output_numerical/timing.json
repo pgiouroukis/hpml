@@ -1,0 +1,6 @@
+{
+  "cuda_max_memory_bytes": 8961198080,
+  "eval_duration_seconds": 120.77767295899685,
+  "test_inference_seconds": 1468.2247881049989,
+  "train_duration_seconds": 5715.553002136003
+}
